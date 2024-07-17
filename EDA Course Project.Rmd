@@ -1,0 +1,226 @@
+---
+title: "EDA - DATA*6500 Course Project"
+author: "Evan Switzer, Roy Namrata"
+date: "2024-07-10"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+A few years ago I(Evan) had my bike stolen at a Go Station. I now ride a beater bike that has got to weigh 50 pounds. I curse my old self every time I ride my "new" bike.
+We want to analyze the crime patterns in Toronto to see if we can find any patterns, specifically targeting subway stations and bike thefts. This is very narrow for a project so we expanded to see if we can find any patterns in major crime indicators as well. We want to find out if there are any trends in different types of crime across Toronto neighborhoods, and see if there is anything useful to gather from this data.
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+library(dplyr)
+library(tmap)
+library(osmdata)
+library(sf)
+library(rosm)
+library(tmaptools)
+library(ggplot2)
+```
+
+# Data Sources
+
+## Neighbourhood_Crime_Rates_Open_Data
+#### https://data.torontopolice.on.ca/datasets/TorontoPS::neighbourhood-crime-rates-open-data/about
+
+"Toronto Neighbourhoods Boundary File includes Crime Data by Neighbourhood. Counts are available at the offence and/or victim level for Assault, Auto Theft, Break and Enter, Robbery, Theft Over, Homicide, Shootings and Theft from Motor Vehicle. Data also includes crime rates per 100,000 people by neighbourhood based on each year's Projected Population by Environics Analytics."
+
+Our Neihgbourhood Crime Rates dataset gives use the number of occurrences of a crime in each neighbourhood as well as the rate per 100,000 people. We have picked the assault, auto theft and bike theft as our categories to analyze.
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#input data
+NeighbourhoodCrimeRates <- read.csv("Neighbourhood_Crime_Rates_Open_Data.csv")
+
+MajorCrimeIndicators <- read.csv("Major_Crime_Indicators_Open_Data.csv")
+
+BicycleThefts <- read.csv("Bicycle_Thefts_Open_Data.csv")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#NeighbourhoodCrimeRates columns
+names(NeighbourhoodCrimeRates)
+#areas
+NeighbourhoodCrimeRates$AREA_NAME
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#get background map of Toronto using openstreetmap
+toronto_bbox = c(left = -79.6392, 
+                 bottom = 43.403221,
+                 right = -79.115952,
+                 top = 43.855457)
+
+toronto_border = opq(toronto_bbox) |> 
+  add_osm_feature(key = "boundary", value = "administrative") |> 
+  add_osm_feature(key = 'admin_level', value = '6') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)() |>
+  filter(name == "Toronto") |> 
+  select()
+
+toronto_ward = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'admin_level', value = '9') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)()
+
+subwayStops = opq(toronto_bbox) |> #
+  add_osm_feature(key = 'railway', value = 'subway_entrance') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  select(name)
+
+toronto_subwayStops = subwayStops[toronto_border,, op=st_within] 
+```
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+toronto_basemap = tmaptools::read_osm(toronto_border, type='osm', mergeTiles=TRUE) 
+```
+
+```{r, echo = FALSE, fig.cap = "Background raster displaying Toronto's Neibourhoods"}
+tm_shape(toronto_basemap)+
+  tm_rgb()+
+  tm_shape(toronto_ward)+
+  tm_borders()
+```
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE, fig.cap = "Background raster displaying Toronto's subway stops."}
+# Plot Toronto basemap with subway stops
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_subwayStops) +
+  tm_dots(col = "name", size = 0.2, legend.show = FALSE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#MajorCrimeIndicators columns
+names(MajorCrimeIndicators)
+
+# Remove rows with "NSA" in any column
+MajorCrimeIndicators <- MajorCrimeIndicators %>%
+  filter_all(all_vars(. != "NSA"))
+```
+
+## Major_Crime_Indicators_Open_Data
+#### https://data.torontopolice.on.ca/datasets/TorontoPS::major-crime-indicators-open-data/about
+
+"This dataset includes all Major Crime Indicators (MCI) occurrences by reported date and related offences since 2014.
+The Major Crime Indicators categories include Assault, Break and Enter, Auto Theft, Robbery and Theft Over (Excludes Sexual Violations). 
+This data is provided at the offence and/or victim level, therefore one occurrence number may have several rows of data associated to the various MCIs used to categorize the occurrence."
+
+Our Major Crime Indicators dataset gives us a row for each offence committed since 2014. It contains all categories of major crime as well as location and date.
+
+```{r, echo=FALSE, fig.cap = "Major crime indicators and what type of crime they are."}
+# Convert MajorCrimeIndicators to an sf object using valid coordinates
+MajorCrimeIndicators <- st_as_sf(MajorCrimeIndicators, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
+
+
+# Ensure all spatial objects are in the same CRS
+toronto_basemap <- st_transform(toronto_basemap, crs = st_crs(MajorCrimeIndicators))
+toronto_ward <- st_transform(toronto_ward, crs = st_crs(MajorCrimeIndicators))
+
+#plot MajorCrimeIndicators on toronto basemap
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_ward) +
+  tm_borders() +
+  tm_shape(MajorCrimeIndicators) +
+  tm_dots(col = "MCI_CATEGORY", size = 0.05, alpha = 0.3, palette = "Set1")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#BicycleThefts columns
+names(BicycleThefts)
+#print any rows that have LONG_WGS84 or LAT_WGS84 as NA or 0
+BicycleThefts %>%
+  filter(LONG_WGS84 == 0 | is.na(LONG_WGS84) | LAT_WGS84 == 0 | is.na(LAT_WGS84))
+#remove the rows with NA or 0 in LONG_WGS84 or LAT_WGS84
+BicycleThefts <- BicycleThefts %>%
+  filter(LONG_WGS84 != 0 & !is.na(LONG_WGS84) & LAT_WGS84 != 0 & !is.na(LAT_WGS84))
+```
+
+## Bicycle_Thefts_Open_Data
+#### https://data.torontopolice.on.ca/datasets/TorontoPS::bicycle-thefts-open-data/about
+
+"This dataset contains occurrences related to bicycle thefts since 2014. These occurrences are related to a variety of offences where the theft of a bicycle was included."
+
+Our Bicycle Thefts dataset gives us a row for each bicycle theft since 2014. It contains the location, date, make, model, cost annd a couple other details about the theft.
+
+```{r, echo=FALSE, fig.cap = "Bicycle thefts and what type of premises they were stolen from."}
+# Convert BicycleThefts to an sf object using valid coordinates
+BicycleThefts <- st_as_sf(BicycleThefts, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
+
+#plot BicycleThefts on toronto basemap
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_ward) +
+  tm_borders() +
+  tm_shape(BicycleThefts) +
+  tm_dots(col = "PREMISES_TYPE", size = 0.05, alpha = 0.3, palette = "Set1")
+```
+
+# Data Cleaning and Preperation
+
+This data is fairly clean already since it is provided by Toronto. However, there are still some issues that need to be taken care of. Some of the data has the value NSA which stands for "Not Specified Area". We will remove this data as there are not enough of them to have a significant effect on the size of our data and since they have no location are not useful to us. We will also remove any rows from the Bicycle Thefts dataset that have NA or 0 in the longitude or latitude columns for the same reason.
+We have ensured that all of our spatial data is converted the same CRS so that we can plot them together.
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#bar plot of crime rate ASSAULT_2014 x AREA_NAME (top 10)
+# NeighbourhoodCrimeRates %>%
+#   top_n(10, ASSAULT_2014) %>%
+#   ggplot(aes(x = reorder(AREA_NAME, ASSAULT_2014), y = ASSAULT_2014, fill = AREA_NAME)) +
+#   geom_bar(stat = "identity") +
+#   coord_flip() +
+#   labs(title = "Crime Rate of Assault in 2014 by Area",
+#        x = "Area Name",
+#        y = "Crime Rate") +
+#   theme_classic() +
+#   scale_fill_viridis_d()
+# 
+# #bar plot of crime rate ASSAULT_2014 x AREA_NAME (bottom 10)
+# NeighbourhoodCrimeRates %>%
+#   top_n(-10, ASSAULT_2014) %>%
+#   ggplot(aes(x = reorder(AREA_NAME, ASSAULT_2014), y = ASSAULT_2014, fill = AREA_NAME)) +
+#   geom_bar(stat = "identity") +
+#   coord_flip() +
+#   labs(title = "Crime Rate of Assault in 2014 by Area",
+#        x = "Area Name",
+#        y = "Crime Rate") +
+#   theme_classic() +
+#   scale_fill_viridis_d()
+# 
+# 
+# #bar plot of POPULATION_2023 x AREA_NAME (top 10)
+# NeighbourhoodCrimeRates %>%
+#   top_n(10, POPULATION_2023) %>%
+#   ggplot(aes(x = reorder(AREA_NAME, POPULATION_2023), y = POPULATION_2023, fill = AREA_NAME)) +
+#   geom_bar(stat = "identity") +
+#   coord_flip() +
+#   labs(title = "Population in 2023 by Area",
+#        x = "Area Name",
+#        y = "Population") +
+#   theme_classic() +
+#   scale_fill_viridis_d()
+# 
+# #bar plot of POPULATION_2023 x AREA_NAME (bottom 10)
+# NeighbourhoodCrimeRates %>%
+#   top_n(-10, POPULATION_2023) %>%
+#   ggplot(aes(x = reorder(AREA_NAME, POPULATION_2023), y = POPULATION_2023, fill = AREA_NAME)) +
+#   geom_bar(stat = "identity") +
+#   coord_flip() +
+#   labs(title = "Population in 2023 by Area",
+#        x = "Area Name",
+#        y = "Population") +
+#   theme_classic() +
+#   scale_fill_viridis_d()
+
+```
