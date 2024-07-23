@@ -3,8 +3,9 @@ title: "EDA - DATA*6500 Course Project Proposal"
 author: "Evan Switzer, Namrata Roy"
 date: "2024-07-11"
 output:
-  pdf_document: default
   html_document: default
+  word_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -18,18 +19,7 @@ A few years ago I(Evan) had my bike stolen at a Go Station. I now ride a beater 
 We aim to conduct an analysis of crime patterns in Toronto with a specific focus on subway stations and bike thefts. Although this is a narrow scope, we have expanded our project to explore major crime indicators such as  Assault, Auto Theft, Break and Enter, Robbery, Theft Over, Homicide, Shootings, etc. Our goal is to identify trends in various types of crime across Toronto neighborhoods and extract valuable insights from the data based on location.
 
 To satisfy our purpose we are considering two more datasets along with the Bicycle Thefts dataset from the open source data of Toronto Police Service. One is the Neighborhood Crime Rates dataset and another is the Major Crime Indicators (MCI) dataset.
-```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
-install.packages("sf")
-install.packages("dplyr")
-install.packages("tmap")
-install.packages("osmdata")
-install.packages("rosm")
-install.packages("tmaptools")
-install.packages("ggplot2")
-install.packages("tinytex")
-install.packages("tidyr")
-install.packages("leaflet")
-```
+
 
 ```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
 library(dplyr)
@@ -42,6 +32,8 @@ library(ggplot2)
 library(tinytex)
 library(tidyr)
 library(leaflet)
+library(spatstat)
+library(raster)
 ```
 
 # Data Sources
@@ -290,9 +282,7 @@ tm_shape(toronto_basemap) +
 ```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
 #BicycleThefts columns
 names(BicycleThefts)
-#print any rows that have LONG_WGS84 or LAT_WGS84 as NA or 0
-BicycleThefts |>
-  filter(LONG_WGS84 == 0 | is.na(LONG_WGS84) | LAT_WGS84 == 0 | is.na(LAT_WGS84))
+
 #remove the rows with NA or 0 in LONG_WGS84 or LAT_WGS84
 BicycleThefts = BicycleThefts |>
   filter(LONG_WGS84 != 0 & !is.na(LONG_WGS84) & LAT_WGS84 != 0 & !is.na(LAT_WGS84))
@@ -307,14 +297,14 @@ The Bicycle Thefts dataset provides detailed information on each incident of bic
 
 ```{r, echo=FALSE, fig.cap = "Bicycle thefts and what type of premises they were stolen from."}
 # Convert BicycleThefts to an sf object using valid coordinates
-BicycleThefts = st_as_sf(BicycleThefts, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
+BicycleThefts_sf = st_as_sf(BicycleThefts, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
 
 #plot BicycleThefts on toronto basemap
 tm_shape(toronto_basemap) +
   tm_rgb() +
   tm_shape(toronto_ward) +
   tm_borders() +
-  tm_shape(BicycleThefts) +
+  tm_shape(BicycleThefts_sf) +
   tm_dots(col = "PREMISES_TYPE", size = 0.05, alpha = 0.3, palette = "Set1")
 ```
 
@@ -364,12 +354,115 @@ ggplot(monthly_bicycle_thefts_trends, aes(x = Month, y = count)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-```{r}
+```{r, echo=FALSE, fig.cap ="Bike Theft Hotspots Near Toronto Subway Stops."}
+# Reproject to a projected coordinate system (e.g., UTM Zone 17N)
+BicycleThefts_sf_utm_zone = st_transform(BicycleThefts_sf, crs = 32617)
+
+# Convert sf object to spatstat ppp object
+bicycle_ppp <- as.ppp(BicycleThefts_sf_utm_zone)
+
+# Perform kernel density estimation
+density <- density(bicycle_ppp, sigma = 0.005)  # Adjust sigma for smoothing
+
+# Convert density to a raster object
+density_raster <- raster(density)
+
+# Reproject subway stops to the same CRS as BicycleThefts
+subwayStops <- st_transform(subwayStops, crs = st_crs(BicycleThefts_sf))
+
+# Filter bike thefts within 500 meters of subway stops
+buffered_subwayStops <- st_buffer(subwayStops, dist = 500)  # 500 meters buffer
+thefts_near_subways <- st_join(BicycleThefts_sf, buffered_subwayStops, join = st_intersects)
+
+# Keep only thefts that are near subway stops
+thefts_near_subways <- thefts_near_subways[!is.na(thefts_near_subways$name), ]
+
+bicycle_thefts_near_subways = thefts_near_subways |>
+  group_by(name) |>
+  summarise(count = n()) 
+
+# Plot the density raster over the basemap using tmap
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(density_raster) +
+  tm_raster(palette = "-RdYlBu", title = "Bike Theft Density Near Subway Stops") +
+  tm_shape(subwayStops) +
+  tm_dots(size = 0.3, col = "blue", alpha = 1) +
+  tm_shape(bicycle_thefts_near_subways) +
+  tm_dots(size = 0.1, col = "red", alpha = 0.3) +
+  tm_layout(title = "Bike Theft Hotspots Near Toronto Subway Stops",
+            legend.outside = TRUE)
+```
+
+```{r, echo=FALSE, fig.cap = "Bicycle theft near subways in year 2014."}
+
+# Filter data for a particular year, e.g., 2014
+bicycle_thefts_near_subways_2014 = thefts_near_subways |>
+  group_by(name, OCC_YEAR) |>
+  summarise(count = n(), .groups = 'drop') |>
+  filter(OCC_YEAR == 2014)
+
+# Plot Bicycle theft for the year 2014 near Toronto subways
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(density_raster) +
+  tm_raster(palette = "-RdYlBu", title = "Bike Theft Density Near Subway Stops") +
+  tm_shape(subwayStops) +
+  tm_dots(size = 0.3, col = "blue", alpha = 1) +
+  tm_shape(bicycle_thefts_near_subways_2014) +
+  tm_dots(size = 0.1, col = "red", alpha = 0.3,palette = "Set1") +
+  tm_layout(title = "Bike Theft Hotspots Near Toronto Subway Stops on 2014",
+            legend.outside = TRUE)
+```
+
+```{r, echo=FALSE, fig.cap = "Bicycle theft near subways in year 2023."}
+
+# Filter data for a particular year, e.g., 2023
+bicycle_thefts_near_subways_2023 = thefts_near_subways |>
+  group_by(name, OCC_YEAR) |>
+  summarise(count = n(), .groups = 'drop') |>
+  filter(OCC_YEAR == 2023)
+
+# Plot Bicycle theft for the year 2023 near Toronto subways
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(density_raster) +
+  tm_raster(palette = "-RdYlBu", title = "Bike Theft Density Near Subway Stops") +
+  tm_shape(subwayStops) +
+  tm_dots(size = 0.3, col = "blue", alpha = 1) +
+  tm_shape(bicycle_thefts_near_subways_2023) +
+  tm_dots(size = 0.1, col = "red", alpha = 0.3,palette = "Set1") +
+  tm_layout(title = "Bike Theft Hotspots Near Toronto Subway Stops on 2023",
+            legend.outside = TRUE)
+```
+
+```{r, echo=FALSE}
+# Combine the data for 2014 and 2023
+combined_thefts <- bind_rows(bicycle_thefts_near_subways_2014, bicycle_thefts_near_subways_2023)
+
+# Filter to include only those records where the theft count is over 100
+filtered_thefts <- combined_thefts |>
+  filter(count > 100)
+
+# Generate the bar plot
+ggplot(filtered_thefts, aes(x = reorder(name, -count), y = count, fill = as.factor(OCC_YEAR))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Bike Thefts Near Subway Stops in 2014 and 2023",
+       x = "Subway Stop",
+       y = "Number of Bike Thefts",
+       fill = "Year") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+```
+
+```{r, echo=FALSE}
 # Transform to the same CRS as BicycleThefts
-toronto_neighborhoods = st_transform(toronto_ward, crs = st_crs(BicycleThefts))
+toronto_neighborhoods = st_transform(toronto_ward, crs = st_crs(BicycleThefts_sf))
 
 # Summarize the data by neighborhood for bicycle thefts
-bicycle_thefts_neighborhood = BicycleThefts |>
+bicycle_thefts_neighborhood = BicycleThefts_sf |>
   group_by(NEIGHBOURHOOD_140) |>
   summarise(count = n())
 
@@ -427,7 +520,7 @@ ggplot(combine_crime_trends, aes(x = Month, y = count, color = Crime_Type, group
 
 ```{r, echo=FALSE, fig.cap = "Seasonal Trends in Bicycle Thefts vs Major Crimes."}
 # Summarize the data by neighborhood for bicycle thefts
-bicycle_trends_neighborhood = BicycleThefts |>
+bicycle_trends_neighborhood = BicycleThefts_sf |>
   group_by(NEIGHBOURHOOD_140) |>
   summarise(count = n()) |>
   mutate(Crime_Type = "Bicycle Theft")
@@ -451,7 +544,7 @@ ggplot(combine_crime_trends_neighborhood, aes(x = reorder(NEIGHBOURHOOD_140, -co
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
-```{r}
+```{r, echo=FALSE}
 # Rename column in new objects
 bicycle_trends_neighborhood_count = bicycle_trends_neighborhood |>
   rename(bike_thefts_count = count)
@@ -466,8 +559,12 @@ combined_crime_trends_neighborhood = st_join(bicycle_trends_neighborhood_count, 
 combined_crime_trends_neighborhood = combined_crime_trends_neighborhood |>
   mutate(bike_theft_ratio = bike_thefts_count / total_crimes_count)
 
+# Filter to include only those records where the bike theft ratio is over 1
+filtered_ratio <- combined_crime_trends_neighborhood |>
+  filter(bike_theft_ratio > 1)
+
 # Plot the ratio of bike thefts to overall crimes by neighborhood
-ggplot(combined_crime_trends_neighborhood, aes(x = reorder(NEIGHBOURHOOD_140.x, -bike_theft_ratio), y = bike_theft_ratio)) +
+ggplot(filtered_ratio, aes(x = reorder(NEIGHBOURHOOD_140.x, -bike_theft_ratio), y = bike_theft_ratio)) +
   geom_bar(stat = "identity", fill = "steelblue") +
   labs(title = "Ratio of Bike Thefts to Overall Crimes by Neighborhood",
        x = "Neighborhood",
@@ -476,7 +573,7 @@ ggplot(combined_crime_trends_neighborhood, aes(x = reorder(NEIGHBOURHOOD_140.x, 
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
-```{r}
+```{r, echo=FALSE}
 # Merge with spatial data
 combined_crime_trends_neighborhood_sf = st_join(toronto_ward, combined_crime_trends_neighborhood)
 
@@ -488,10 +585,6 @@ tm_shape(combined_crime_trends_neighborhood_sf) +
   tm_polygons("bike_theft_ratio", palette = "Blues", title = "Bike Theft Ratio") +
   tm_layout(title = "Ratio of Bike Thefts to Overall Crimes by Neighborhood",
             legend.outside = TRUE)
-```
-
-```{r}
-
 ```
 
 # Data Cleaning and Preperation
