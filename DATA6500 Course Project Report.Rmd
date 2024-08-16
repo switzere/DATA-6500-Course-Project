@@ -1,0 +1,376 @@
+---
+title: "DATA*6500 Course Project Report"
+author: "Evan Switzer, Namrata Roy"
+date: "2024-07-11"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+library(dplyr)
+library(tmap)
+library(osmdata)
+library(sf)
+library(rosm)
+library(tmaptools)
+library(ggplot2)
+library(tinytex)
+library(tidyr)
+library(leaflet)
+library(spatstat)
+library(raster)
+library(spdep)
+```
+
+# Data Sources
+
+## Neighbourhood_Crime_Rates_Open_Data
+#### https://data.torontopolice.on.ca/datasets/TorontoPS::neighbourhood-crime-rates-open-data/about
+
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#input data
+NeighbourhoodCrimeRates = read.csv("Neighbourhood_Crime_Rates_Open_Data.csv")
+
+MajorCrimeIndicators = read.csv("Major_Crime_Indicators_Open_Data.csv")
+
+BicycleThefts = read.csv("Bicycle_Thefts_Open_Data.csv")
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#get background map of Toronto using openstreetmap
+toronto_bbox = c(left = -79.6392, 
+                 bottom = 43.403221,
+                 right = -79.115952,
+                 top = 43.855457)
+
+toronto_border = opq(toronto_bbox, timeout = 600) |> 
+  add_osm_feature(key = "boundary", value = "administrative") |> 
+  add_osm_feature(key = 'admin_level', value = '6') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)() |>
+  filter(name == "Toronto") |> 
+  dplyr::select()
+
+toronto_ward = opq(toronto_bbox, timeout = 60) |> 
+  add_osm_feature(key = 'admin_level', value = '9') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_multipolygons)()
+
+subwayStops = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'railway', value = 'subway_entrance') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  dplyr::select(name)
+
+#for subway stops add the subway line
+subwayLines = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'railway', value = 'subway') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_lines)() |> 
+  dplyr::select(name)
+
+toronto_subwayLines = subwayLines[toronto_border,, op=st_within]
+
+#for each subwayStop find the subway line
+subwayStops <- subwayStops |>
+  mutate(subwayLineIndex = st_nearest_feature(subwayStops, toronto_subwayLines),
+         subwayLine = toronto_subwayLines$name[subwayLineIndex])
+
+toronto_subwayStops = subwayStops[toronto_border,, op=st_within] 
+```
+
+
+```{r}
+#get bus stops from openstreetmap
+busStops = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'highway', value = 'bus_stop') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  dplyr::select(name)
+
+toronto_busStops = busStops[toronto_border,, op=st_within]
+
+#get bike parking from openstreetmap
+bikeParking = opq(toronto_bbox) |> 
+  add_osm_feature(key = 'amenity', value = 'bicycle_parking') |> 
+  osmdata_sf() |> 
+  (\(x) x$osm_points)() |> 
+  dplyr::select(name)
+
+toronto_bikeParking = bikeParking[toronto_border,, op=st_within]
+
+```
+
+
+
+```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+toronto_basemap = tmaptools::read_osm(toronto_border, type='osm', mergeTiles=TRUE) 
+```
+
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE, fig.cap = "Background raster displaying Toronto's subway stops."}
+# Plot Toronto basemap with subway stops, each colour relates to it's line, plot black line for each subway line too
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_subwayStops) +
+  tm_dots(col = "subwayLine", size = 0.2, legend.show = FALSE, palette = "Set1") +
+  tm_shape(toronto_subwayLines) +
+  tm_lines(col = "name", size = 0.5, legend.show = FALSE, palette = "Set1")
+```
+
+```{r}
+#plot toronto bus stops
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_busStops) +
+  tm_dots(col = "name", size = 0.2, legend.show = FALSE, palette = "Set1")
+```
+
+```{r}
+#plot toronto bike parking
+tm_shape(toronto_basemap) +
+  tm_rgb() +
+  tm_shape(toronto_bikeParking) +
+  tm_dots(size = 0.2, legend.show = FALSE, palette = "Set1")
+```
+
+Analyzing bike crime in Toronto using your data can provide valuable insights into spatial and temporal patterns. Here are some methods you can consider:
+
+### 1. **Spatial Analysis:**
+   - **Hotspot Analysis:**
+     - Use **Kernel Density Estimation (KDE)** to identify areas with high concentrations of bicycle thefts. This can help pinpoint hotspots where bike theft is more frequent.
+     - Perform **Getis-Ord Gi* statistic** to detect statistically significant clusters of high or low bike theft occurrences.
+
+   - **Proximity Analysis:**
+     - Analyze the proximity of bike theft incidents to subway stops, bus stops, and bike parking facilities. This can reveal whether thefts are more likely to occur near certain types of infrastructure.
+     - Use **buffer analysis** to create zones around bike parking facilities or transit stops and analyze theft rates within these zones.
+
+   - **Correlation with Neighborhood Crime Rates:**
+     - Investigate the correlation between bicycle thefts and overall neighborhood crime rates. This could help determine if bike thefts are more common in neighborhoods with higher crime rates.
+     - Use **spatial regression models** (e.g., Geographically Weighted Regression, Spatial Lag Models) to explore how different spatial factors (e.g., proximity to transit, neighborhood crime rates) influence the likelihood of bicycle theft.
+
+   - **Cluster Analysis:**
+     - Perform **spatial clustering** (e.g., K-means, DBSCAN) to identify clusters of thefts and explore what characteristics these areas share, such as types of transit nearby or bike parking availability.
+
+### 2. **Temporal Analysis:**
+   - **Trend Analysis:**
+     - Analyze the time series of bike theft incidents to identify trends over time, such as increases or decreases in thefts during specific months or years.
+     - Decompose time series data to examine seasonal patterns, trends, and residuals using methods like **Seasonal Decomposition of Time Series (STL)**.
+
+   - **Seasonal and Temporal Patterns:**
+     - Examine seasonal trends in bike thefts, identifying whether certain times of the year (e.g., summer) see higher rates of theft.
+     - Use **time-of-day analysis** to explore when thefts are most likely to occur, perhaps in relation to commuting patterns or daylight hours.
+
+   - **Temporal Clustering:**
+     - Perform **temporal clustering** to identify periods with spikes in bike thefts and analyze what factors might contribute to these spikes, such as events, holidays, or weather conditions.
+
+### 3. **Spatio-Temporal Analysis:**
+   - **Spatio-Temporal Hotspot Analysis:**
+     - Extend hotspot analysis to the spatio-temporal domain by identifying not only where but also when thefts are most likely to occur. This can be done using **spatio-temporal KDE** or **Space-Time Cube analysis**.
+     
+   - **Spatio-Temporal Clustering:**
+     - Implement spatio-temporal clustering methods (e.g., **ST-DBSCAN**) to identify patterns that emerge over space and time, such as recurring theft hotspots at particular times of the day or year.
+     
+   - **Spatio-Temporal Regression Models:**
+     - Build spatio-temporal regression models to understand how spatial and temporal variables together influence bike thefts. This might include variables like weather, events, or changes in public transit schedules.
+
+### 4. **Accessibility and Equity Analysis:**
+   - **Accessibility Analysis:**
+     - Analyze the accessibility of bike parking and its relation to thefts, considering whether areas with fewer parking facilities have higher theft rates.
+     
+   - **Equity Analysis:**
+     - Investigate whether bike thefts are more prevalent in certain neighborhoods, possibly relating this to socio-economic factors or public infrastructure distribution.
+
+### 5. **Predictive Modeling:**
+   - **Machine Learning Models:**
+     - Train machine learning models (e.g., Random Forest, Gradient Boosting) using spatial and temporal features to predict future bike theft occurrences. This can be useful for proactive policing and resource allocation.
+     
+   - **Risk Mapping:**
+     - Develop a risk map indicating areas with a higher predicted risk of bike theft, combining spatial, temporal, and environmental factors.
+
+By combining these methods, you can gain a comprehensive understanding of bike theft patterns in Toronto, leading to more informed decisions and effective interventions.
+
+
+#Hotspot Analysis
+#Kernel Density Estimation (KDE)
+
+```{r}
+#KDE for bicycle thefts
+bicycle_thefts_sf = st_as_sf(BicycleThefts, coords = c("LONG_WGS84", "LAT_WGS84"), crs = 4326)
+bicycle_thefts_transformed <- st_transform(bicycle_thefts_sf, crs = 32617)
+
+toronto_border_st <- st_transform(toronto_border, crs = 32617)
+window <- as.owin(toronto_border_st)
+
+#convert to .ppp object
+bicycle_thefts_ppp = bicycle_thefts_transformed |> 
+  st_coordinates() |>
+  as.ppp( W = window )
+
+```
+
+```{r}
+kde <- density.ppp(bicycle_thefts_ppp) |>
+  terra::rast()
+
+crs(kde) = "EPSG:4547"
+```
+
+```{r}
+#plot kde
+tm_shape(kde) +
+  tm_raster() +
+  tm_shape(toronto_border) +
+  tm_borders()
+```
+
+- **Proximity Analysis:**
+     - Analyze the proximity of bike theft incidents to subway stops, bus stops, and bike parking facilities. This can reveal whether thefts are more likely to occur near certain types of infrastructure.
+     - Use **buffer analysis** to create zones around bike parking facilities or transit stops and analyze theft rates within these zones.
+
+```{r}
+#Buffer analysis for bike parking
+
+# Assuming you have already transformed bike thefts to UTM zone 17N (EPSG:32617)
+# Transform other datasets to the same CRS
+subway_stops <- st_transform(toronto_subwayStops, crs = 32617)
+bus_stops <- st_transform(toronto_busStops, crs = 32617)
+bike_parking <- st_transform(toronto_bikeParking, crs = 32617)
+```
+
+```{r}
+# Add unique IDs to buffers
+bike_parking_buffers <- st_buffer(bike_parking, dist = 200)
+bike_parking_buffers$id <- seq_len(nrow(bike_parking_buffers))  # Unique ID for each buffer
+
+subway_buffers <- st_buffer(subway_stops, dist = 200)
+subway_buffers$id <- seq_len(nrow(subway_buffers))
+
+bus_buffers <- st_buffer(bus_stops, dist = 200)
+bus_buffers$id <- seq_len(nrow(bus_buffers))
+
+```
+
+```{r}
+# Join bike thefts with bike parking buffers
+thefts_in_parking_buffers <- st_join(bicycle_thefts_transformed, bike_parking_buffers)
+
+# Summarize thefts within bike parking buffers
+thefts_in_parking_summary <- thefts_in_parking_buffers %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarize(num_thefts = n(), .groups = 'drop')
+
+# Repeat for subway and bus buffers
+thefts_in_subway_buffers <- st_join(bicycle_thefts_transformed, subway_buffers)
+thefts_in_subway_summary <- thefts_in_subway_buffers %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarize(num_thefts = n(), .groups = 'drop')
+
+thefts_in_bus_buffers <- st_join(bicycle_thefts_transformed, bus_buffers)
+thefts_in_bus_summary <- thefts_in_bus_buffers %>%
+  filter(!is.na(id)) %>%
+  group_by(id) %>%
+  summarize(num_thefts = n(), .groups = 'drop')
+
+```
+
+```{r}
+print(thefts_in_parking_summary)
+print(thefts_in_subway_summary)
+print(thefts_in_bus_summary)
+
+```
+
+```{r}
+# Example for bike parking
+ggplot() +
+  geom_sf(data = bike_parking_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_parking_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Bike Parking Facilities")
+
+# Repeat for subway and bus stops
+ggplot() +
+  geom_sf(data = subway_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_subway_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Subway Stops")
+
+ggplot() +
+  geom_sf(data = bus_buffers, fill = "black", alpha = 1) +
+  geom_sf(data = thefts_in_bus_summary, color = "red", alpha = 0.1) +
+  theme_minimal() +
+  labs(title = "Bike Thefts near Bus Stops")
+
+```
+
+
+```{r}
+# Bar plot of theft counts in bike parking buffers
+ggplot(thefts_in_parking_summary, aes(x = id, y = num_thefts)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Thefts in Bike Parking Buffers", x = "Buffer ID", y = "Number of Thefts")
+
+# Bar plot of theft counts in subway buffers
+ggplot(thefts_in_subway_summary, aes(x = id, y = num_thefts)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Thefts in Transit Buffers", x = "Buffer ID", y = "Number of Thefts")
+
+# Bar plot of theft counts in bus buffers
+ggplot(thefts_in_bus_summary, aes(x = id, y = num_thefts)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Thefts in Bus Buffers", x = "Buffer ID", y = "Number of Thefts")
+
+```
+
+```{r}
+# Combine summaries for bike parking and subway
+combined_summary <- thefts_in_parking_summary %>%
+  mutate(buffer_type = "Bike Parking") %>%
+  bind_rows(
+    thefts_in_subway_summary %>%
+      mutate(buffer_type = "Subway")
+  )
+
+# Statistical test or regression model
+# Example: t-test (assuming normality)
+t.test(num_thefts ~ buffer_type, data = combined_summary)
+
+# Repeat for bus stops
+combined_summary <- thefts_in_parking_summary %>%
+  mutate(buffer_type = "Bike Parking") %>%
+  bind_rows(
+    thefts_in_bus_summary %>%
+      mutate(buffer_type = "Subway")
+  )
+    
+t.test(num_thefts ~ buffer_type, data = combined_summary)
+
+# Repeat for subway and bus stops
+combined_summary <- thefts_in_subway_summary %>%
+  mutate(buffer_type = "Subway") %>%
+  bind_rows(
+    thefts_in_bus_summary %>%
+      mutate(buffer_type = "Bus")
+  )
+    
+t.test(num_thefts ~ buffer_type, data = combined_summary)
+
+
+
+```
+
+
