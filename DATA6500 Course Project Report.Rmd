@@ -26,6 +26,8 @@ library(leaflet)
 library(spatstat)
 library(raster)
 library(spdep)
+library(lubridate)
+library(INLA)
 ```
 
 # Data Sources
@@ -43,6 +45,43 @@ MajorCrimeIndicators = read.csv("Major_Crime_Indicators_Open_Data.csv")
 
 BicycleThefts = read.csv("Bicycle_Thefts_Open_Data.csv")
 ```
+
+```{r}
+
+# Parse OCC_DATE to POSIXct
+BicycleThefts <- BicycleThefts %>%
+  mutate(OCC_DATE = ymd_hms(OCC_DATE))
+
+#for bike thefts remove any with OCC_YEAR less than 2014, greater than or equal to 2024, or NA
+BicycleThefts <- BicycleThefts %>%
+  filter(!is.na(OCC_YEAR), OCC_YEAR >= 2014, OCC_YEAR < 2024)
+```
+
+```{r}
+
+
+#create days from start of 2014 for each theft
+BicycleThefts$OCC_DATE_FROM2014 <- as.numeric(difftime(BicycleThefts$OCC_DATE, as.Date("2014-01-01"), units = "days"))
+
+#summarize thefts per day
+BicycleTheftsPerDay <- BicycleThefts %>%
+  group_by(OCC_DATE_FROM2014) %>%
+  summarize(thefts = n()) 
+
+#summarize thefts per month per year
+BicycleTheftsPerMonth <- BicycleThefts %>%
+  mutate(OCC_MONTH = month(OCC_DATE)) %>%
+  group_by(OCC_MONTH, OCC_YEAR) %>%
+  summarize(thefts = n()) 
+
+BicycleTheftsPerMonth <- BicycleTheftsPerMonth %>%
+  mutate(YearMonth = make_date(OCC_YEAR, OCC_MONTH, 1))
+
+BicycleTheftsPerMonth$time_id <- as.integer(as.factor(BicycleTheftsPerMonth$YearMonth))
+BicycleTheftsPerMonth$time_id2 <- BicycleTheftsPerMonth$time_id
+
+```
+
 
 ```{r, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
 #get background map of Toronto using openstreetmap
@@ -373,4 +412,94 @@ t.test(num_thefts ~ buffer_type, data = combined_summary)
 
 ```
 
+### 2. **Temporal Analysis:**
+   - **Trend Analysis:**
+     - Analyze the time series of bike theft incidents to identify trends over time, such as increases or decreases in thefts during specific months or years.
+     - Decompose time series data to examine seasonal patterns, trends, and residuals using methods like **Seasonal Decomposition of Time Series (STL)**.
+
+   - **Seasonal and Temporal Patterns:**
+     - Examine seasonal trends in bike thefts, identifying whether certain times of the year (e.g., summer) see higher rates of theft.
+     - Use **time-of-day analysis** to explore when thefts are most likely to occur, perhaps in relation to commuting patterns or daylight hours.
+
+   - **Temporal Clustering:**
+     - Perform **temporal clustering** to identify periods with spikes in bike thefts and analyze what factors might contribute to these spikes, such as events, holidays, or weather conditions.
+
+```{r}
+# barplot of thefts by year
+BicycleThefts %>%
+  mutate(OCC_YEAR = as.numeric(as.character(OCC_YEAR))) %>%
+  ggplot(aes(x = OCC_YEAR)) +
+  geom_bar() +
+  labs(title = "Bicycle Thefts by Year", x = "Year", y = "Number of Thefts")
+
+#barplot of thefts by month
+BicycleThefts %>%
+  mutate(OCC_MONTH = month(OCC_DATE, label = TRUE)) %>%
+  ggplot(aes(x = OCC_MONTH)) +
+  geom_bar() +
+  labs(title = "Bicycle Thefts by Month", x = "Month", y = "Number of Thefts")
+
+#line graph of thefts over each for for entire period
+ggplot(BicycleTheftsPerDay) +
+  geom_line(aes(x = OCC_DATE_FROM2014, y = thefts)) +
+  labs(title = "Bicycle Thefts Over Time", x = "Days from Start of 2014", y = "Number of Thefts")
+
+# Plot the number of thefts per month over time
+ggplot(BicycleTheftsPerMonth, aes(x = YearMonth, y = thefts, group = 1)) +
+  geom_line(color = "blue") +
+  geom_point() +  # Optional: Add points to highlight each month's data
+  labs(title = "Monthly Bicycle Thefts Over Time",
+       x = "Year",
+       y = "Number of Thefts") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+```
+
+```{r}
+#create predicting data for next 4 years
+predict_data = cbind.data.frame(YearMonth = seq.Date(from = as.Date("2024-01-01"), to = as.Date("2027-12-01"), by = "month"),
+                                time_id = seq(121, 168, 1),
+                                time_id2 = seq(121, 168, 1),
+                                thefts = rep(NA,48),
+                                OCC_MONTH = month(seq.Date(from = as.Date("2024-01-01"), to = as.Date("2027-12-01"), by = "month")),
+                                OCC_YEAR = year(seq.Date(from = as.Date("2024-01-01"), to = as.Date("2027-12-01"), by = "month"))
+                                )
+
+time_data_wmiss=rbind.data.frame(BicycleTheftsPerMonth, predict_data)
+```
+
+```{r}
+time_model_seasonal = inla(thefts ~ 1 + f(time_id, model = "ar1") + f(time_id2, model = "seasonal", season.length = 12), 
+                           data = time_data_wmiss, 
+                           family = "gaussian", 
+                           E = list(time_data_wmiss$time_id2),
+                           control.predictor = list(compute=TRUE))
+
+```
+
+```{r}
+time_data_wmiss$forcasts = time_model_seasonal$summary.fitted.values$mean
+time_data_wmiss$lb = time_model_seasonal$summary.fitted.values[,3]
+time_data_wmiss$ub = time_model_seasonal$summary.fitted.values[,5]
+time_data_wmiss <- time_data_wmiss %>% ungroup()
+```
+
+```{r}
+
+dataForcast <- time_data_wmiss |> filter (YearMonth > as.Date("2023-12-01"))
+```
+
+```{r}
+dataTheft <- time_data_wmiss |> filter (YearMonth <= as.Date("2023-12-01"))
+```
+
+```{r}
+
+ggplot() +
+  geom_line(data = dataForcast, aes(x = YearMonth, y = forcasts), col = "red", lwd = 0.8) +
+  geom_ribbon(data = dataForcast, aes(ymin = lb, ymax = ub, x = YearMonth), fill = "red", alpha = 0.4) +
+  geom_line(data = dataTheft, aes(x = YearMonth, y = thefts), col = "blue", lwd = 0.8) +
+  theme_bw() +
+  labs(y = "Number of Thefts", x = "Year")
+```
 
